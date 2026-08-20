@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { evaluateVeritas } from '../veritas.mjs';
-import { validateExternalRunBundle } from './schema.mjs';
+import { isSafeEvidencePath, validateExternalRunBundle } from './schema.mjs';
 
 const execFileAsync = promisify(execFile);
 const MAX_EVIDENCE_BYTES = 16 * 1024 * 1024;
@@ -19,6 +19,15 @@ export function sha256Buffer(value) {
 
 export function sha256Text(value) {
   return sha256Buffer(Buffer.from(canonicalText(value), 'utf8'));
+}
+
+async function resolveEvidenceFile(bundleRoot, relative) {
+  if (!isSafeEvidencePath(relative)) throw new Error(`unsafe evidence path: ${relative}`);
+  const root = await fs.realpath(bundleRoot);
+  const target = await fs.realpath(path.resolve(bundleRoot, relative));
+  const boundary = `${root}${path.sep}`;
+  if (target !== root && !target.startsWith(boundary)) throw new Error(`evidence path escapes bundle root: ${relative}`);
+  return target;
 }
 
 async function sha256File(file) {
@@ -99,8 +108,8 @@ export async function verifyExternalRun({ bundle, bundlePath, workspace, taskCla
   const artifactResults = [];
   for (const artifact of artifacts) {
     if (!artifact?.path || !artifact?.sha256) continue;
-    const target = path.resolve(bundleRoot, artifact.path);
     try {
+      const target = await resolveEvidenceFile(bundleRoot, artifact.path);
       const actual = await sha256File(target);
       const passed = actual.toLowerCase() === artifact.sha256.toLowerCase();
       artifactResults.push({ name: artifact.name, kind: artifact.kind, path: artifact.path, passed, expected: artifact.sha256, actual });
@@ -114,7 +123,7 @@ export async function verifyExternalRun({ bundle, bundlePath, workspace, taskCla
   const artifactsPassed = declaredArtifactsComplete && artifactResults.every(item => item.passed);
   checks.push(check('external-artifact-integrity', artifactsPassed, { artifacts: artifactResults }));
 
-  const diffArtifact = artifacts.find(item => item?.kind === 'git-diff');
+  const diffArtifact = artifacts.find(item => item?.kind === 'git-diff' && isSafeEvidencePath(item?.path));
   let diffBindingPassed = false;
   if (!diffArtifact) {
     missing.push('git-diff artifact is required');
@@ -122,7 +131,8 @@ export async function verifyExternalRun({ bundle, bundlePath, workspace, taskCla
     try {
       const actualGitDiff = await canonicalGitDiff(resolvedWorkspace, base, head);
       const actualGitDiffHash = sha256Text(actualGitDiff);
-      const artifactText = canonicalText(await fs.readFile(path.resolve(bundleRoot, diffArtifact.path), 'utf8'));
+      const diffArtifactPath = await resolveEvidenceFile(bundleRoot, diffArtifact.path);
+      const artifactText = canonicalText(await fs.readFile(diffArtifactPath, 'utf8'));
       const artifactSemanticHash = sha256Text(artifactText);
       const expected = bundle.repository.diff_sha256.toLowerCase();
       diffBindingPassed = actualGitDiffHash === expected && artifactSemanticHash === expected;
@@ -161,8 +171,8 @@ export async function verifyExternalRun({ bundle, bundlePath, workspace, taskCla
   if (!tests.length) missing.push('at least one test evidence record is required for a code-change run');
   for (const test of tests) {
     if (!test?.output_path || !test?.output_sha256 || !Number.isInteger(test?.exit_code)) continue;
-    const target = path.resolve(bundleRoot, test.output_path);
     try {
+      const target = await resolveEvidenceFile(bundleRoot, test.output_path);
       const actual = await sha256File(target);
       const integrity = actual.toLowerCase() === test.output_sha256.toLowerCase();
       if (!integrity) contradictions.push(`test output hash mismatch: ${test.output_path}`);
