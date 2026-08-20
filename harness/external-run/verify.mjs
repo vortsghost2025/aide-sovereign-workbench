@@ -30,6 +30,11 @@ async function resolveEvidenceFile(bundleRoot, relative) {
   return target;
 }
 
+function evidenceBoundaryViolation(error) {
+  const message = String(error?.message || error);
+  return message.startsWith('unsafe evidence path:') || message.startsWith('evidence path escapes bundle root:');
+}
+
 async function sha256File(file) {
   const stat = await fs.stat(file);
   if (stat.size > MAX_EVIDENCE_BYTES) throw new Error(`evidence file exceeds ${MAX_EVIDENCE_BYTES} bytes: ${file}`);
@@ -115,8 +120,10 @@ export async function verifyExternalRun({ bundle, bundlePath, workspace, taskCla
       artifactResults.push({ name: artifact.name, kind: artifact.kind, path: artifact.path, passed, expected: artifact.sha256, actual });
       if (!passed) contradictions.push(`artifact hash mismatch: ${artifact.path}`);
     } catch (error) {
-      artifactResults.push({ name: artifact.name, kind: artifact.kind, path: artifact.path, passed: false, missing: true, error: error.message });
-      missing.push(`artifact unavailable: ${artifact.path}`);
+      const boundary = evidenceBoundaryViolation(error);
+      artifactResults.push({ name: artifact.name, kind: artifact.kind, path: artifact.path, passed: false, missing: !boundary, rejected: boundary, error: error.message });
+      if (boundary) contradictions.push(error.message);
+      else missing.push(`artifact unavailable: ${artifact.path}`);
     }
   }
   const declaredArtifactsComplete = artifacts.length > 0 && artifactResults.length === artifacts.length;
@@ -143,7 +150,8 @@ export async function verifyExternalRun({ bundle, bundlePath, workspace, taskCla
         artifact_diff_sha256: artifactSemanticHash
       }));
     } catch (error) {
-      missing.push(`unable to verify git diff evidence: ${error.message}`);
+      if (evidenceBoundaryViolation(error)) contradictions.push(error.message);
+      else missing.push(`unable to verify git diff evidence: ${error.message}`);
       checks.push(check('external-diff-binding', false, { error: error.message }));
     }
   } else {
@@ -187,8 +195,10 @@ export async function verifyExternalRun({ bundle, bundlePath, workspace, taskCla
         actual
       });
     } catch (error) {
-      missing.push(`test evidence unavailable: ${test.output_path}`);
-      testResults.push({ name: test.name, command: test.command, exit_code: test.exit_code, output_path: test.output_path, integrity: false, missing: true, passed: false, error: error.message });
+      const boundary = evidenceBoundaryViolation(error);
+      if (boundary) contradictions.push(error.message);
+      else missing.push(`test evidence unavailable: ${test.output_path}`);
+      testResults.push({ name: test.name, command: test.command, exit_code: test.exit_code, output_path: test.output_path, integrity: false, missing: !boundary, rejected: boundary, passed: false, error: error.message });
     }
   }
   const testsIntegrityPassed = tests.length > 0 && testResults.length === tests.length && testResults.every(item => item.integrity);
