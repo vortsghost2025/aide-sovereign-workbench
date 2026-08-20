@@ -43,8 +43,48 @@ function checkLine(name, passed, detail = '') {
   return `${passed ? 'PASS' : 'FAIL'} ${name}${detail ? ` - ${detail}` : ''}`;
 }
 
+function parseObscuraCliVersion(text) {
+  const match = String(text || '').trim().match(/^obscura\s+([^\s]+)$/m);
+  return match?.[1] || null;
+}
+
+async function probeRemoteCliVersion(host, remoteBinary) {
+  try {
+    const { stdout, stderr } = await execFileAsync('ssh', [
+      '-T',
+      '-o', 'BatchMode=yes',
+      '-o', 'ConnectTimeout=10',
+      host,
+      remoteBinary,
+      '--version'
+    ], {
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024,
+      timeout: 30_000,
+      windowsHide: true
+    });
+    const text = String(stdout || '').trim();
+    return {
+      ok: true,
+      text,
+      stderr: String(stderr || '').trim(),
+      version: parseObscuraCliVersion(text)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      text: String(error?.stdout || '').trim(),
+      stderr: String(error?.stderr || '').trim(),
+      version: null,
+      error: error?.message || String(error)
+    };
+  }
+}
+
 async function main() {
   const host = readArg('host', 'headless');
+  const nodeName = readArg('node', host);
+  const tailnetIp = readArg('tailnet-ip', null);
   const remoteBinary = readArg('remote', '/home/we4free/opt/aide-obscura-v0.2.0/obscura');
   const url = readArg('url', 'https://example.com');
   const expectedTitle = readArg('expect-title', 'Example Domain');
@@ -70,6 +110,12 @@ async function main() {
   const evidenceDir = path.join(outputRoot, 'evidence');
   await fs.mkdir(evidenceDir, { recursive: true });
   const startedAt = new Date().toISOString();
+
+  const cliProbe = await probeRemoteCliVersion(host, remoteBinary);
+  await writeUtf8(
+    path.join(evidenceDir, 'cli-version.txt'),
+    `${cliProbe.text || ''}${cliProbe.stderr ? `\nstderr: ${cliProbe.stderr}` : ''}${cliProbe.error ? `\nerror: ${cliProbe.error}` : ''}\n`
+  );
 
   const client = new SshMcpClient({ host, remoteBinary, timeoutMs: 30_000 });
   let initialization;
@@ -131,11 +177,15 @@ async function main() {
   const snapshotText = toolText(snapshot);
   const markdownText = toolText(markdown);
   const evaluationText = toolText(evaluation);
+  const mcpServerVersion = initialization?.serverInfo?.version || null;
+  const mcpProtocolVersion = initialization?.protocolVersion || null;
 
   const assertions = [
+    ['cli-version-probe', cliProbe.ok, cliProbe.error || cliProbe.text || 'missing'],
+    ['obscura-cli-version', cliProbe.version === expectedVersion, `${cliProbe.version || 'missing'} expected ${expectedVersion}`],
     ['mcp-initialized', initialization?.serverInfo?.name === 'obscura-mcp', initialization?.serverInfo?.name || 'missing'],
-    ['obscura-version', initialization?.serverInfo?.version === expectedVersion, initialization?.serverInfo?.version || 'missing'],
-    ['required-tools', requiredTools.every(name => toolNames.includes(name)), `${requiredTools.filter(name => !toolNames.includes(name)).join(', ') || 'all present'}`],
+    ['mcp-protocol', mcpProtocolVersion === '2024-11-05', mcpProtocolVersion || 'missing'],
+    ['required-tools', requiredTools.every(name => toolNames.includes(name)), requiredTools.filter(name => !toolNames.includes(name)).join(', ') || 'all present'],
     ['navigation-completed', Boolean(navigate) && !missionError, missionError?.message || toolText(navigate)],
     ['snapshot-title', snapshotText.includes(expectedTitle), expectedTitle],
     ['markdown-title', markdownText.includes(expectedTitle), expectedTitle],
@@ -155,6 +205,7 @@ async function main() {
   await writeUtf8(diffPath, diffText);
 
   const evidenceFiles = [
+    ['cli-version', 'runtime-version', 'evidence/cli-version.txt'],
     ['mcp-transcript', 'mcp-transcript', 'evidence/mcp-transcript.ndjson'],
     ['initialize', 'mcp-initialize', 'evidence/initialize.json'],
     ['tool-catalog', 'mcp-tools', 'evidence/tools.json'],
@@ -194,9 +245,14 @@ async function main() {
       agent: 'obscura-mcp-over-ssh',
       provider: 'ssh-stdio',
       model: 'none',
-      host,
+      transport_host: host,
+      node: nodeName,
+      tailnet_ip: tailnetIp,
       engine: 'obscura',
-      engine_version: initialization?.serverInfo?.version || 'unknown'
+      engine_version: cliProbe.version || 'unknown',
+      mcp_server: initialization?.serverInfo?.name || 'unknown',
+      mcp_server_version: mcpServerVersion || 'unknown',
+      mcp_protocol_version: mcpProtocolVersion || 'unknown'
     },
     timing: { started_at: startedAt, finished_at: finishedAt },
     claim: {
@@ -225,7 +281,27 @@ async function main() {
 
   const verdict = await verifyExternalRun({ bundle, bundlePath, workspace, taskClass: 'explanation' });
   await writeUtf8(path.join(outputRoot, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
-  await writeUtf8(path.join(outputRoot, 'report.md'), `${renderExternalRunReport(verdict)}\n`);
+
+  const evidenceReport = renderExternalRunReport(verdict);
+  const combinedReport = [
+    '# AIDE Distributed Browser Run',
+    '',
+    `Execution outcome: ${missionPassed ? 'PASS' : 'FAIL'}`,
+    `Evidence verification: ${String(verdict.disposition || 'unknown').toUpperCase()}`,
+    `Obscura CLI: ${cliProbe.version || 'unknown'}`,
+    `Obscura MCP server: ${mcpServerVersion || 'unknown'}`,
+    `MCP protocol: ${mcpProtocolVersion || 'unknown'}`,
+    `Transport: SSH stdio via ${host}`,
+    `Node: ${nodeName}${tailnetIp ? ` (${tailnetIp})` : ''}`,
+    '',
+    'Execution success and evidence verification are independent axes. A failed execution may still have authentic, internally consistent evidence.',
+    '',
+    '---',
+    '',
+    evidenceReport,
+    ''
+  ].join('\n');
+  await writeUtf8(path.join(outputRoot, 'report.md'), combinedReport);
 
   const manifestEntries = [];
   async function walk(directory) {
@@ -242,10 +318,12 @@ async function main() {
   manifestEntries.sort((a, b) => a.path.localeCompare(b.path));
   await writeUtf8(path.join(outputRoot, 'manifest.sha256.json'), `${JSON.stringify(manifestEntries, null, 2)}\n`);
 
-  console.log(`Browser mission: ${missionPassed ? 'PASS' : 'FAIL'}`);
-  console.log(`Veritas disposition: ${verdict.disposition}`);
+  console.log(`Execution outcome: ${missionPassed ? 'PASS' : 'FAIL'}`);
+  console.log(`Evidence verification: ${verdict.disposition}`);
   console.log(`Evidence score: ${Math.round(verdict.evidence_score * 100)}%`);
-  console.log(`Obscura: ${initialization?.serverInfo?.version || 'unknown'} via ssh ${host}`);
+  console.log(`Obscura CLI: ${cliProbe.version || 'unknown'}`);
+  console.log(`Obscura MCP server: ${mcpServerVersion || 'unknown'} (protocol ${mcpProtocolVersion || 'unknown'})`);
+  console.log(`Node: ${nodeName}${tailnetIp ? ` ${tailnetIp}` : ''} via ssh ${host}`);
   console.log(`Evidence: ${outputRoot}`);
 
   if (!missionPassed || verdict.disposition !== 'verified') process.exitCode = 1;
