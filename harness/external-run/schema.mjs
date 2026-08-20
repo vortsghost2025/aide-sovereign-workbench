@@ -4,7 +4,7 @@ export const EXTERNAL_RUN_SCHEMA = 'aide.external-run/v1';
 export const CLAIM_STATUSES = new Set(['success', 'failure', 'partial']);
 
 const SHA256 = /^[a-f0-9]{64}$/i;
-const COMMIT = /^[a-f0-9]{7,64}$/i;
+const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
 function string(value) {
   return typeof value === 'string' && value.trim().length > 0;
@@ -59,9 +59,9 @@ export function validateExternalRunBundle(bundle) {
   else if (!CLAIM_STATUSES.has(bundle.claim.status)) invalid(issues, 'claim.status', 'must be success, failure, or partial');
 
   if (!string(bundle.repository?.base_commit)) missing(issues, 'repository.base_commit');
-  else if (!COMMIT.test(bundle.repository.base_commit)) invalid(issues, 'repository.base_commit', 'must look like a Git commit id');
+  else if (!COMMIT.test(bundle.repository.base_commit)) invalid(issues, 'repository.base_commit', 'must be a full Git SHA-1 or SHA-256 commit id');
   if (!string(bundle.repository?.head_commit)) missing(issues, 'repository.head_commit');
-  else if (!COMMIT.test(bundle.repository.head_commit)) invalid(issues, 'repository.head_commit', 'must look like a Git commit id');
+  else if (!COMMIT.test(bundle.repository.head_commit)) invalid(issues, 'repository.head_commit', 'must be a full Git SHA-1 or SHA-256 commit id');
   if (!Array.isArray(bundle.repository?.changed_files)) missing(issues, 'repository.changed_files');
   else {
     for (const [index, file] of bundle.repository.changed_files.entries()) {
