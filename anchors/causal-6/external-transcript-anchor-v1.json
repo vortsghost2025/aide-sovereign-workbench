@@ -1,0 +1,12 @@
+{
+  "schema": "aide.external-transcript-anchor/v1",
+  "anchored_at": "2026-08-21T02:30:03.053Z",
+  "anchor_request_sha256": "a556f387af813add16693efad45b9f36db4fed36d9b4c8a24062355ebc86fe0b",
+  "transcript_sha256": "ac446700711b2871255ee093781d4770387d7c6be3678aa39675577627c236c3",
+  "source_commit": "c3b0d3177af4ba76ce8f96a9df81829f2a941606",
+  "challenge_nonce": "b8375a17b7614f112a6eee254fa3013ab26f001524aff1e4df77937e18569a4f",
+  "response_token": "c8da5b98bb66e955800afb02bfac3be47bbcc071eef021c4876d4f034fa200f6",
+  "process_identity_sha256": "57bd6ba70f8f4ac9829859e73886f127967e0f69c2f7532f3fa8fd6303b60216",
+  "world_event_sha256": "c6b2ec7e8a2674acb77100e7804588231230b2d5fe7f9882f2c69c78ddfa422a",
+  "semantic_observation_sha256": "99dff667555cb13a0c5670de9ac3dc019a9a205178b319babb6a11761f010dae"
+}
